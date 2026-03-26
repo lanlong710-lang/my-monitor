@@ -9,9 +9,21 @@ TWITTER_USER = "alpha123cc"
 SERVERCHAN_SENDKEY = os.environ.get("SCKEY")
 STATE_FILE = "monitor_state.json"
 
+def send_wechat(title, content, source="系统通知"):
+    if not SERVERCHAN_SENDKEY:
+        print("⚠️ 没找到 SCKEY，请检查 GitHub Secrets")
+        return
+    print(f"🚀 尝试发送微信: {title}")
+    url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
+    data = {"title": f"【{source}】{title}", "desp": content}
+    try:
+        r = requests.post(url, data=data, timeout=15)
+        print(f"微信服务器返回: {r.text}")
+    except Exception as e:
+        print(f"❌ 微信推送崩溃: {e}")
+
 def get_twitter_update():
-    print(f"--- 正在检查推特 (@{TWITTER_USER}) ---")
-    # Nitter 是目前抓取推特最稳的源
+    print(f"--- 检查推特 (@{TWITTER_USER}) ---")
     url = f"https://nitter.net/{TWITTER_USER}/rss"
     try:
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
@@ -19,99 +31,66 @@ def get_twitter_update():
             root = ET.fromstring(res.content)
             item = root.find(".//item")
             if item is not None:
-                print("✅ 推特数据获取成功")
                 return {
                     "id": item.find("guid").text if item.find("guid") is not None else item.find("link").text,
                     "title": item.find("title").text,
-                    "link": item.find("link").text,
-                    "source": "Twitter"
+                    "link": item.find("link").text
                 }
-    except Exception as e:
-        print(f"❌ 推特获取异常: {e}")
+    except: pass
     return None
 
 def get_binance_update():
-    print("--- 正在检查币安公告 ---")
-    # 尝试多个不同的镜像站，绕过币安对 GitHub IP 的封锁
-    mirrors = [
-        "https://rsshub.app/binance/announcement/93",
-        "https://hub.001001.xyz/binance/announcement/93",
-        "https://rss.lilyre.com/binance/announcement/93",
-        "https://rsshub.rssforever.com/binance/announcement/93"
-    ]
-    
-    for url in mirrors:
-        try:
-            print(f"尝试镜像: {url}")
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
-            if res.status_code == 200:
-                root = ET.fromstring(res.content)
-                item = root.find(".//item")
-                if item is not None:
-                    print("✅ 币安公告获取成功")
-                    return {
-                        "id": item.find("guid").text if item.find("guid") is not None else item.find("link").text,
-                        "title": item.find("title").text,
-                        "link": item.find("link").text,
-                        "source": "币安公告"
-                    }
-            else:
-                print(f"⚠️ 状态码: {res.status_code}")
-        except Exception as e:
-            print(f"❌ 该镜像超时或异常: {e}")
+    print("--- 检查币安公告 ---")
+    # 尝试直接请求 API，但换一组超级模拟头
+    api_url = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+    payload = {"type": 1, "catalogId": "93", "pageNo": 1, "pageSize": 5}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "clienttype": "web"
+    }
+    try:
+        res = requests.post(api_url, json=payload, headers=headers, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            articles = data.get("data", {}).get("catalogs", [{}])[0].get("articles", [])
+            if articles:
+                print("✅ 币安数据获取成功")
+                latest = articles[0]
+                return {
+                    "id": str(latest['id']),
+                    "title": latest['title'],
+                    "link": f"https://www.binance.com/zh-CN/support/announcement/{latest['code']}"
+                }
+        print(f"⚠️ 币安 API 仍然报错: {res.status_code}")
+    except: pass
     return None
 
-def send_wechat(msg):
-    if not SERVERCHAN_SENDKEY: return
-    print(f"🚀 准备推送微信: {msg['title']}")
-    url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-    data = {
-        "title": f"【{msg['source']}】新提醒", 
-        "desp": f"内容：{msg['title']}\n\n[查看详情]({msg['link']})"
-    }
-    # 尝试推送，最多试2次
-    for i in range(2):
-        try:
-            r = requests.post(url, data=data, timeout=15)
-            print(f"微信返回结果: {r.text}")
-            if r.status_code == 200: break
-        except:
-            print(f"推送第 {i+1} 次失败，正在重试...")
-            time.sleep(2)
-
 def main():
-    print(f"=== 监控启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    print(f"=== 监控运行 {time.strftime('%H:%M:%S')} ===")
     
-    # 读取旧状态
-    state = {"twitter_last_id": "", "binance_last_id": ""}
-    if os.path.exists(STATE_FILE):
+    # 第一次运行？强制发一条测试，确认微信通路！
+    if not os.path.exists(STATE_FILE):
+        send_wechat("连接成功", "这是系统自动发送的第一次连接测试，如果你收到了，说明监控已就绪！", "初始化")
+        state = {"twitter_last_id": "", "binance_last_id": ""}
+    else:
         with open(STATE_FILE, "r") as f:
-            try:
-                state = json.load(f)
-            except: pass
+            state = json.load(f)
 
-    # 1. 处理推特
-    t_msg = get_twitter_update()
-    if t_msg:
-        if t_msg['id'] != state.get("twitter_last_id"):
-            send_wechat(t_msg)
-            state["twitter_last_id"] = t_msg['id']
-        else:
-            print("ℹ️ 推特内容未更新，跳过推送")
+    # 1. 推特逻辑
+    t = get_twitter_update()
+    if t and t['id'] != state.get("twitter_last_id"):
+        send_wechat(t['title'], f"[点击查看]({t['link']})", "推特")
+        state["twitter_last_id"] = t['id']
 
-    # 2. 处理币安
-    b_msg = get_binance_update()
-    if b_msg:
-        if b_msg['id'] != state.get("binance_last_id"):
-            send_wechat(b_msg)
-            state["binance_last_id"] = b_msg['id']
-        else:
-            print("ℹ️ 币安公告未更新，跳过推送")
+    # 2. 币安逻辑
+    b = get_binance_update()
+    if b and b['id'] != state.get("binance_last_id"):
+        send_wechat(b['title'], f"[点击查看]({b['link']})", "币安")
+        state["binance_last_id"] = b['id']
 
-    # 保存新状态
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
-    print("=== 监控任务结束 ===")
+    print("=== 运行结束 ===")
 
 if __name__ == "__main__":
     main()
