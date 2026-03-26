@@ -1,0 +1,34 @@
+name: 每5分钟自动监控
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Monitoring
+        env:
+          SCKEY: ${{ secrets.SCKEY }}
+        run: python 20260326_01_推特与币安监控脚本.py
+
+      - name: Save State
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add monitor_state.json
+          git commit -m "Update state [skip ci]" || exit 0
+          git push
