@@ -2,6 +2,7 @@ import requests
 import os
 import json
 import xml.etree.ElementTree as ET
+import time
 
 # --- 配置区 ---
 TWITTER_USER = "alpha123cc"
@@ -10,11 +11,10 @@ STATE_FILE = "monitor_state.json"
 
 def get_twitter_update():
     print(f"--- 正在检查推特 (@{TWITTER_USER}) ---")
-    # Nitter 源（刚才日志里成功的那个）
+    # Nitter 是目前抓取推特最稳的源
     url = f"https://nitter.net/{TWITTER_USER}/rss"
-    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        res = requests.get(url, headers=headers, timeout=15)
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             item = root.find(".//item")
@@ -27,22 +27,23 @@ def get_twitter_update():
                     "source": "Twitter"
                 }
     except Exception as e:
-        print(f"❌ 推特获取失败: {e}")
+        print(f"❌ 推特获取异常: {e}")
     return None
 
 def get_binance_update():
     print("--- 正在检查币安公告 ---")
-    # 既然 API 403，我们换成 RSSHub 镜像来抓取币安公告，这通常能绕过 IP 屏蔽
-    # 路径 93 是新币上市公告
-    rss_urls = [
+    # 尝试多个不同的镜像站，绕过币安对 GitHub IP 的封锁
+    mirrors = [
         "https://rsshub.app/binance/announcement/93",
+        "https://hub.001001.xyz/binance/announcement/93",
+        "https://rss.lilyre.com/binance/announcement/93",
         "https://rsshub.rssforever.com/binance/announcement/93"
     ]
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    for url in rss_urls:
+    
+    for url in mirrors:
         try:
-            print(f"尝试从 RSS 获取币安公告: {url}")
-            res = requests.get(url, headers=headers, timeout=15)
+            print(f"尝试镜像: {url}")
+            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
                 item = root.find(".//item")
@@ -54,44 +55,63 @@ def get_binance_update():
                         "link": item.find("link").text,
                         "source": "币安公告"
                     }
-            print(f"⚠️ 状态码: {res.status_code}")
+            else:
+                print(f"⚠️ 状态码: {res.status_code}")
         except Exception as e:
-            print(f"❌ 币安 RSS 异常: {e}")
+            print(f"❌ 该镜像超时或异常: {e}")
     return None
 
 def send_wechat(msg):
     if not SERVERCHAN_SENDKEY: return
-    print(f"🚀 正在发送微信通知: {msg['title']}")
+    print(f"🚀 准备推送微信: {msg['title']}")
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-    data = {"title": f"【{msg['source']}】新动态", "desp": f"{msg['title']}\n\n[查看详情]({msg['link']})"}
-    try:
-        r = requests.post(url, data=data, timeout=10)
-        print(f"微信返回: {r.text}")
-    except:
-        print("❌ 发送失败")
+    data = {
+        "title": f"【{msg['source']}】新提醒", 
+        "desp": f"内容：{msg['title']}\n\n[查看详情]({msg['link']})"
+    }
+    # 尝试推送，最多试2次
+    for i in range(2):
+        try:
+            r = requests.post(url, data=data, timeout=15)
+            print(f"微信返回结果: {r.text}")
+            if r.status_code == 200: break
+        except:
+            print(f"推送第 {i+1} 次失败，正在重试...")
+            time.sleep(2)
 
 def main():
-    print("=== 监控任务启动 ===")
-    state = {}
+    print(f"=== 监控启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    
+    # 读取旧状态
+    state = {"twitter_last_id": "", "binance_last_id": ""}
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
-            state = json.load(f)
+            try:
+                state = json.load(f)
+            except: pass
 
-    # 检查推特
+    # 1. 处理推特
     t_msg = get_twitter_update()
-    if t_msg and t_msg['id'] != state.get("twitter_last_id"):
-        send_wechat(t_msg)
-        state["twitter_last_id"] = t_msg['id']
+    if t_msg:
+        if t_msg['id'] != state.get("twitter_last_id"):
+            send_wechat(t_msg)
+            state["twitter_last_id"] = t_msg['id']
+        else:
+            print("ℹ️ 推特内容未更新，跳过推送")
 
-    # 检查币安
+    # 2. 处理币安
     b_msg = get_binance_update()
-    if b_msg and b_msg['id'] != state.get("binance_last_id"):
-        send_wechat(b_msg)
-        state["binance_last_id"] = b_msg['id']
+    if b_msg:
+        if b_msg['id'] != state.get("binance_last_id"):
+            send_wechat(b_msg)
+            state["binance_last_id"] = b_msg['id']
+        else:
+            print("ℹ️ 币安公告未更新，跳过推送")
 
+    # 保存新状态
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
-    print("=== 任务结束 ===")
+    print("=== 监控任务结束 ===")
 
 if __name__ == "__main__":
     main()
