@@ -5,33 +5,31 @@ import time
 import xml.etree.ElementTree as ET
 
 # --- 配置区 ---
-TWITTER_USER = "binancezh"  # 监控币安中文官推
-KEYWORDS = ["交易竞赛", "瓜分", "积分"] # 触发推送的关键词
+TWITTER_ALPHA = "alpha123cc"        # 账号1：无条件全量推送
+TWITTER_BINANCE = "binancezh"       # 账号2：只推送命中关键词的
+BINANCE_KEYWORDS = ["交易竞赛", "瓜分", "积分"] # 账号2的触发关键词
+
 SERVERCHAN_SENDKEY = os.environ.get("SCKEY")
 STATE_FILE = "monitor_state.json"
 
-def send_wechat(title, link, matched_kws):
+def send_wechat(title, content, source="监控系统"):
     if not SERVERCHAN_SENDKEY: return
-    print(f"🚀 触发关键词 {matched_kws}，准备推送微信...")
+    print(f"🚀 准备推送微信: 【{source}】{title[:15]}...")
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-    
-    # 微信卡片内容排版
-    desp = f"### {title}\n\n**命中关键词**：{', '.join(matched_kws)}\n\n[🔗 点击这里直达推文]({link})"
-    data = {"title": "🚨 币安活动预警", "desp": desp}
-    
+    data = {"title": f"【{source}】预警", "desp": f"### {title}\n\n{content}"}
     try:
         requests.post(url, data=data, timeout=10)
         print("✅ 微信推送成功！")
     except Exception as e:
         print(f"❌ 微信推送失败: {e}")
 
-def get_twitter_update():
-    print(f"--- 正在检查推特 (@{TWITTER_USER}) ---")
-    # 使用多个 Nitter 镜像源确保高可用
+def fetch_tweets(username):
+    print(f"--- 正在获取推特 (@{username}) ---")
+    # 使用多个 Nitter 镜像源确保稳定抓取
     urls = [
-        f"https://nitter.net/{TWITTER_USER}/rss",
-        f"https://nitter.cz/{TWITTER_USER}/rss",
-        f"https://nitter.poast.org/{TWITTER_USER}/rss"
+        f"https://nitter.net/{username}/rss",
+        f"https://nitter.cz/{username}/rss",
+        f"https://nitter.poast.org/{username}/rss"
     ]
     for url in urls:
         try:
@@ -40,51 +38,58 @@ def get_twitter_update():
                 root = ET.fromstring(res.content)
                 item = root.find(".//item")
                 if item is not None:
-                    print("✅ 推特数据获取成功")
+                    print(f"✅ @{username} 数据获取成功")
                     title = item.find("title").text if item.find("title") is not None else ""
                     desc = item.find("description").text if item.find("description") is not None else ""
                     link = item.find("link").text
                     guid = item.find("guid").text if item.find("guid") is not None else link
-                    
-                    # 把标题和正文拼在一起，全方位检测关键词
-                    full_text = title + " " + desc
-                    matched_kws = [kw for kw in KEYWORDS if kw in full_text]
-                    
-                    return {
-                        "id": guid,
-                        "title": title,
-                        "link": link,
-                        "matched": matched_kws
-                    }
+                    return {"id": guid, "title": title, "desc": desc, "link": link}
         except: pass
-    print("❌ 所有推特源获取失败")
+    print(f"❌ @{username} 获取失败")
     return None
 
 def main():
     print(f"=== 监控启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
     
-    state = {"twitter_last_id": ""}
+    # 初始化或读取历史记录
+    state = {"alpha_last_id": "", "binance_last_id": ""}
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             try: state = json.load(f)
             except: pass
 
-    # 获取最新推文
-    t = get_twitter_update()
-    
-    if t:
-        if t['id'] != state.get("twitter_last_id"):
-            # 发现新推文，更新记录防止下次重复处理
-            state["twitter_last_id"] = t['id']
-            
-            # 判断是否包含我们想要的关键词
-            if t['matched']:
-                send_wechat(t['title'], t['link'], t['matched'])
-            else:
-                print(f"ℹ️ 最新推文未包含关键词。标题摘要: {t['title'][:30]}...")
+    # ---------------------------------------------------------
+    # 逻辑 1：处理 alpha123cc (无条件直接推送)
+    # ---------------------------------------------------------
+    t_alpha = fetch_tweets(TWITTER_ALPHA)
+    if t_alpha:
+        if t_alpha['id'] != state.get("alpha_last_id"):
+            state["alpha_last_id"] = t_alpha['id']
+            # 直接推送，不需要判断关键词
+            send_wechat(t_alpha['title'], f"[🔗 点击直达推文]({t_alpha['link']})", "Alpha动态")
         else:
-            print("ℹ️ 暂无新推文发布。")
+            print(f"ℹ️ @{TWITTER_ALPHA} 暂无新推文。")
 
+    # ---------------------------------------------------------
+    # 逻辑 2：处理 binancezh (关键词精准过滤)
+    # ---------------------------------------------------------
+    t_binance = fetch_tweets(TWITTER_BINANCE)
+    if t_binance:
+        if t_binance['id'] != state.get("binance_last_id"):
+            state["binance_last_id"] = t_binance['id']
+            # 将标题和正文合并，检查是否包含关键词
+            full_text = t_binance['title'] + " " + t_binance['desc']
+            matched_kws = [kw for kw in BINANCE_KEYWORDS if kw in full_text]
+            
+            if matched_kws:
+                content = f"**命中关键词**：{', '.join(matched_kws)}\n\n[🔗 点击直达推文]({t_binance['link']})"
+                send_wechat(t_binance['title'], content, "币安活动")
+            else:
+                print(f"ℹ️ @{TWITTER_BINANCE} 新推文未命中关键词，自动过滤。")
+        else:
+            print(f"ℹ️ @{TWITTER_BINANCE} 暂无新推文。")
+
+    # ---------------------------------------------------------
     # 保存状态
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
